@@ -1,0 +1,8 @@
+streamlit
+yfinance
+pandas
+numpy
+altair
+curl-cffi
+openpyxl
+xlsxwriter
