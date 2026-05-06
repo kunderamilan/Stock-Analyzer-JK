@@ -266,31 +266,38 @@ def fetch_company_info(ticker: str) -> dict:
         "earningsTrend", "earningsHistory", "calendarEvents",
     ])
 
-    # ── info: yfinance first, supplement missing fields from quoteSummary ──
+    # ── info: yfinance first, always supplement missing fields from quoteSummary ──
+    # t.info on Streamlit Cloud may return a non-empty but incomplete dict
+    # (e.g. only {"symbol": "GOOGL"}) – so we always fill missing keys from the
+    # quoteSummary modules fetched via the direct API above.
     info = _safe(lambda: t.info) or {}
     fd = qs.get("financialData", {})
     ap = qs.get("assetProfile", {})
-    if not info:
-        # Build info from quoteSummary when t.info is empty (e.g. on cloud)
-        sd = qs.get("summaryDetail", {})
-        qt = qs.get("quoteType", {})
-        info = {
-            "longName":               ap.get("longName") or qt.get("longName"),
-            "sector":                 ap.get("sector"),
-            "industry":               ap.get("industry"),
-            "country":                ap.get("country"),
-            "website":                ap.get("website"),
-            "fullTimeEmployees":      ap.get("fullTimeEmployees"),
-            "longBusinessSummary":    ap.get("longBusinessSummary"),
-            "auditRisk":              ap.get("auditRisk"),
-            "boardRisk":              ap.get("boardRisk"),
-            "compensationRisk":       ap.get("compensationRisk"),
-            "shareHolderRightsRisk":  ap.get("shareHolderRightsRisk"),
-            "overallRisk":            ap.get("overallRisk"),
-            "currentPrice":           _raw(fd, "currentPrice"),
-            "regularMarketPrice":     _raw(sd, "regularMarketPrice"),
-        }
-    # Supplement analyst target / recommendation fields from financialData
+    sd = qs.get("summaryDetail", {})
+    qt = qs.get("quoteType", {})
+
+    # Fields sourced from assetProfile / quoteType
+    _ap_fallback = {
+        "longName":               ap.get("longName") or qt.get("longName"),
+        "sector":                 ap.get("sector"),
+        "industry":               ap.get("industry"),
+        "country":                ap.get("country"),
+        "website":                ap.get("website"),
+        "fullTimeEmployees":      ap.get("fullTimeEmployees"),
+        "longBusinessSummary":    ap.get("longBusinessSummary"),
+        "auditRisk":              ap.get("auditRisk"),
+        "boardRisk":              ap.get("boardRisk"),
+        "compensationRisk":       ap.get("compensationRisk"),
+        "shareHolderRightsRisk":  ap.get("shareHolderRightsRisk"),
+        "overallRisk":            ap.get("overallRisk"),
+        "currentPrice":           _raw(fd, "currentPrice"),
+        "regularMarketPrice":     _raw(sd, "regularMarketPrice"),
+    }
+    for _k, _v in _ap_fallback.items():
+        if info.get(_k) is None and _v is not None:
+            info[_k] = _v
+
+    # Fields sourced from financialData (analyst targets / recommendation)
     if fd:
         for _k_info, _k_fd in [
             ("targetMeanPrice",        "targetMeanPrice"),
