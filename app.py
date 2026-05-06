@@ -218,7 +218,10 @@ def fetch_quick_metrics(ticker: str) -> dict:
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_company_info(ticker: str) -> dict:
     """
-    Fetch all company-info data from yfinance in one call.
+    Fetch all company-info data.
+    Earnings/calendar/estimates are fetched via direct quoteSummary API calls
+    (same approach as the valuation table) so they work on Streamlit Cloud where
+    certain yfinance property endpoints get blocked. yfinance is used as fallback.
     Returns a dict with keys: info, income_stmt, major_holders,
     institutional_holders, calendar, news, earnings_estimate,
     revenue_estimate, earnings_history.
@@ -234,8 +237,154 @@ def fetch_company_info(ticker: str) -> dict:
         except Exception:
             return None
 
-    info                 = _safe(lambda: t.info) or {}
-    # Use annual income_stmt; fall back to quarterly if empty
+    def _raw(d, key, default=None):
+        try:
+            return d[key]["raw"]
+        except Exception:
+            return default
+
+    # ── Direct quoteSummary API (works on Streamlit Cloud) ────────────────
+    def _fetch_quote_summary(modules: list) -> dict:
+        modules_str = "%2C".join(modules)
+        for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+            try:
+                url = (
+                    f"https://{host}/v10/finance/quoteSummary/{ticker}"
+                    f"?modules={modules_str}"
+                )
+                resp = session.get(url, timeout=15)
+                data = resp.json()
+                result = data.get("quoteSummary", {}).get("result")
+                if result:
+                    return result[0]
+            except Exception:
+                continue
+        return {}
+
+    qs = _fetch_quote_summary([
+        "assetProfile", "summaryDetail", "financialData", "quoteType",
+        "earningsTrend", "earningsHistory", "calendarEvents",
+    ])
+
+    # ── info: yfinance first, supplement missing fields from quoteSummary ──
+    info = _safe(lambda: t.info) or {}
+    fd = qs.get("financialData", {})
+    ap = qs.get("assetProfile", {})
+    if not info:
+        # Build info from quoteSummary when t.info is empty (e.g. on cloud)
+        sd = qs.get("summaryDetail", {})
+        qt = qs.get("quoteType", {})
+        info = {
+            "longName":               ap.get("longName") or qt.get("longName"),
+            "sector":                 ap.get("sector"),
+            "industry":               ap.get("industry"),
+            "country":                ap.get("country"),
+            "website":                ap.get("website"),
+            "fullTimeEmployees":      ap.get("fullTimeEmployees"),
+            "longBusinessSummary":    ap.get("longBusinessSummary"),
+            "auditRisk":              ap.get("auditRisk"),
+            "boardRisk":              ap.get("boardRisk"),
+            "compensationRisk":       ap.get("compensationRisk"),
+            "shareHolderRightsRisk":  ap.get("shareHolderRightsRisk"),
+            "overallRisk":            ap.get("overallRisk"),
+            "currentPrice":           _raw(fd, "currentPrice"),
+            "regularMarketPrice":     _raw(sd, "regularMarketPrice"),
+        }
+    # Supplement analyst target / recommendation fields from financialData
+    if fd:
+        for _k_info, _k_fd in [
+            ("targetMeanPrice",        "targetMeanPrice"),
+            ("targetHighPrice",        "targetHighPrice"),
+            ("targetLowPrice",         "targetLowPrice"),
+            ("recommendationMean",     "recommendationMean"),
+            ("recommendationKey",      "recommendationKey"),
+            ("numberOfAnalystOpinions","numberOfAnalystOpinions"),
+            ("currentPrice",           "currentPrice"),
+        ]:
+            if info.get(_k_info) is None:
+                _v = fd.get(_k_fd)
+                info[_k_info] = _v.get("raw") if isinstance(_v, dict) else _v
+
+    # ── calendar (calendarEvents module) ──────────────────────────────────
+    calendar = None
+    _ce = qs.get("calendarEvents", {})
+    if _ce:
+        _earn_node = _ce.get("earnings", {})
+        if _earn_node:
+            _earn_dates_raw = _earn_node.get("earningsDate", [])
+            calendar = {
+                "Earnings Date": [
+                    pd.Timestamp(d["raw"], unit="s")
+                    for d in _earn_dates_raw if isinstance(d, dict) and "raw" in d
+                ],
+                "Earnings Average": _raw(_earn_node, "earningsAverage"),
+                "Earnings Low":     _raw(_earn_node, "earningsLow"),
+                "Earnings High":    _raw(_earn_node, "earningsHigh"),
+                "Revenue Average":  _raw(_earn_node, "revenueAverage"),
+                "Revenue Low":      _raw(_earn_node, "revenueLow"),
+                "Revenue High":     _raw(_earn_node, "revenueHigh"),
+            }
+    if calendar is None:
+        calendar = _safe(lambda: t.calendar)
+
+    # ── earnings_estimate & revenue_estimate (earningsTrend module) ───────
+    earnings_estimate = None
+    revenue_estimate  = None
+    _et = qs.get("earningsTrend", {})
+    _trend = _et.get("trend", []) if _et else []
+    if _trend:
+        _ee_rows, _re_rows, _periods = [], [], []
+        for _item in _trend:
+            _period = _item.get("period")
+            _ee_node = _item.get("earningsEstimate", {})
+            _re_node = _item.get("revenueEstimate", {})
+            _ee_rows.append({
+                "avg":              _raw(_ee_node, "avg"),
+                "low":              _raw(_ee_node, "low"),
+                "high":             _raw(_ee_node, "high"),
+                "yearAgoEps":       _raw(_ee_node, "yearAgoEps"),
+                "numberOfAnalysts": _raw(_ee_node, "numberOfAnalysts"),
+                "growth":           _raw(_ee_node, "growth"),
+            })
+            _re_rows.append({
+                "avg":              _raw(_re_node, "avg"),
+                "low":              _raw(_re_node, "low"),
+                "high":             _raw(_re_node, "high"),
+                "yearAgoRevenue":   _raw(_re_node, "yearAgoRevenue"),
+                "numberOfAnalysts": _raw(_re_node, "numberOfAnalysts"),
+                "growth":           _raw(_re_node, "growth"),
+            })
+            _periods.append(_period)
+        if _ee_rows:
+            earnings_estimate = pd.DataFrame(_ee_rows, index=_periods)
+        if _re_rows:
+            revenue_estimate  = pd.DataFrame(_re_rows, index=_periods)
+    if earnings_estimate is None:
+        earnings_estimate = _safe(lambda: t.earnings_estimate)
+    if revenue_estimate is None:
+        revenue_estimate = _safe(lambda: t.revenue_estimate)
+
+    # ── earnings_history (earningsHistory module) ──────────────────────────
+    earnings_history = None
+    _eh_node = qs.get("earningsHistory", {})
+    _eh_list = _eh_node.get("history", []) if _eh_node else []
+    if _eh_list:
+        _eh_rows = []
+        for _h in _eh_list:
+            _q_raw = _h.get("quarter", {}).get("raw") if isinstance(_h.get("quarter"), dict) else None
+            _eh_rows.append({
+                "quarter":         pd.Timestamp(_q_raw, unit="s") if _q_raw else None,
+                "epsActual":       _raw(_h, "epsActual"),
+                "epsEstimate":     _raw(_h, "epsEstimate"),
+                "epsDifference":   _raw(_h, "epsDifference"),
+                "surprisePercent": _raw(_h, "surprisePercent"),
+            })
+        if _eh_rows:
+            earnings_history = pd.DataFrame(_eh_rows).set_index("quarter")
+    if earnings_history is None:
+        earnings_history = _safe(lambda: t.earnings_history)
+
+    # ── income_stmt (yfinance — uses v8 financial statements API) ─────────
     _inc_annual = _safe(lambda: t.income_stmt)
     _inc_qtr    = _safe(lambda: t.quarterly_income_stmt)
     if _inc_annual is not None and not getattr(_inc_annual, "empty", True):
@@ -244,13 +393,10 @@ def fetch_company_info(ticker: str) -> dict:
         income_stmt = _inc_qtr
     else:
         income_stmt = None
-    major_holders        = _safe(lambda: t.major_holders)
+
+    major_holders         = _safe(lambda: t.major_holders)
     institutional_holders = _safe(lambda: t.institutional_holders)
-    calendar             = _safe(lambda: t.calendar)
-    news                 = _safe(lambda: t.news) or []
-    earnings_estimate    = _safe(lambda: t.earnings_estimate)
-    revenue_estimate     = _safe(lambda: t.revenue_estimate)
-    earnings_history     = _safe(lambda: t.earnings_history)
+    news                  = _safe(lambda: t.news) or []
 
     return {
         "info":                  info,
