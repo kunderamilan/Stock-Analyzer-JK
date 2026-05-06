@@ -268,6 +268,8 @@ def fetch_company_info(ticker: str) -> dict:
     # ── Direct quoteSummary — dual-method for max compatibility ───────────
     # Method 1: t._data.get_raw_json()  → works on corporate networks (CSRF cookie)
     # Method 2: crumb via fc.yahoo.com  → works on Streamlit Cloud (no SSL proxy)
+    _fetch_errors: list = []
+
     def _fetch_quote_summary(modules: list) -> dict:
         import urllib.parse as _urlparse
         modules_str = "%2C".join(modules)
@@ -282,27 +284,34 @@ def fetch_company_info(ticker: str) -> dict:
             result = data.get("quoteSummary", {}).get("result")
             if result:
                 return result[0]
-        except Exception:
-            pass
+            else:
+                _fetch_errors.append(f"M1: no result, raw={str(data)[:200]}")
+        except Exception as _e1:
+            _fetch_errors.append(f"M1 exc: {type(_e1).__name__}: {str(_e1)[:200]}")
 
         # Method 2 — crumb via fc.yahoo.com (works on Streamlit Cloud)
         try:
             crumb = get_yf_crumb()
+            _fetch_errors.append(f"M2 crumb={repr(crumb[:20]) if crumb else 'EMPTY'}")
             crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
             for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
                 url = (
                     f"https://{host}/v10/finance/quoteSummary/{ticker}"
                     f"?modules={modules_str}{crumb_param}"
                 )
-                resp = session.get(url, timeout=15)
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                result = data.get("quoteSummary", {}).get("result")
-                if result:
-                    return result[0]
-        except Exception:
-            pass
+                try:
+                    resp = session.get(url, timeout=15)
+                    _fetch_errors.append(f"M2 {host}: HTTP {resp.status_code}, body={resp.text[:120]}")
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    result = data.get("quoteSummary", {}).get("result")
+                    if result:
+                        return result[0]
+                except Exception as _e2h:
+                    _fetch_errors.append(f"M2 {host} exc: {str(_e2h)[:120]}")
+        except Exception as _e2:
+            _fetch_errors.append(f"M2 exc: {type(_e2).__name__}: {str(_e2)[:200]}")
 
         return {}
 
@@ -468,6 +477,7 @@ def fetch_company_info(ticker: str) -> dict:
             "info_keys":       len(info),
             "info_longName":   info.get("longName"),
             "info_sector":     info.get("sector"),
+            "fetch_errors":    _fetch_errors,
         },
     }
 
