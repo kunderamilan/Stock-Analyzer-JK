@@ -321,15 +321,6 @@ def fetch_company_info(ticker: str) -> dict:
     sd = qs.get("summaryDetail", {})
     qt = qs.get("quoteType", {})
 
-    # ── Debug: expose quoteSummary status via session_state (readable in UI) ──
-    import streamlit as _st
-    _st.session_state["_qs_debug"] = {
-        "qs_modules": list(qs.keys()),
-        "fd_keys_sample": list(fd.keys())[:5] if fd else [],
-        "ap_sector": ap.get("sector"),
-        "info_keys": len(info),
-    }
-
     # Fields sourced from assetProfile / quoteType
     _ap_fallback = {
         "longName":               ap.get("longName") or qt.get("longName"),
@@ -469,6 +460,15 @@ def fetch_company_info(ticker: str) -> dict:
         "earnings_estimate":     earnings_estimate,
         "revenue_estimate":      revenue_estimate,
         "earnings_history":      earnings_history,
+        "_debug": {
+            "qs_modules":      list(qs.keys()),
+            "ap_sector":       ap.get("sector"),
+            "ap_longName":     ap.get("longName") or qt.get("longName"),
+            "fd_targetMean":   (fd.get("targetMeanPrice") or {}).get("raw") if isinstance(fd.get("targetMeanPrice"), dict) else fd.get("targetMeanPrice"),
+            "info_keys":       len(info),
+            "info_longName":   info.get("longName"),
+            "info_sector":     info.get("sector"),
+        },
     }
 
 
@@ -2905,10 +2905,8 @@ else:
         _info = _ci["info"]
 
         # ── Temporary debug (remove after cloud issue is resolved) ────────
-        _qs_dbg = st.session_state.get("_qs_debug", {})
-        if _qs_dbg:
-            with st.expander("🔧 Debug: quoteSummary status", expanded=False):
-                st.json(_qs_dbg)
+        with st.expander("🔧 Debug: quoteSummary status", expanded=True):
+            st.json(_ci.get("_debug", {}))
         # ─────────────────────────────────────────────────────────────────
 
         _ci_tabs = st.tabs([
