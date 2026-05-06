@@ -281,8 +281,6 @@ def fetch_company_info(ticker: str) -> dict:
     # ── Direct quoteSummary — dual-method for max compatibility ───────────
     # Method 1: t._data.get_raw_json()  → works on corporate networks (CSRF cookie)
     # Method 2: crumb via fc.yahoo.com  → works on Streamlit Cloud (no SSL proxy)
-    _fetch_errors: list = []
-
     def _fetch_quote_summary(modules: list) -> dict:
         import urllib.parse as _urlparse
         import time as _time
@@ -299,20 +297,16 @@ def fetch_company_info(ticker: str) -> dict:
                 result = data.get("quoteSummary", {}).get("result")
                 if result:
                     return result[0]
-                else:
-                    _fetch_errors.append(f"M1 attempt {_attempt}: no result, raw={str(data)[:200]}")
-                    break
+                break
             except Exception as _e1:
-                _fetch_errors.append(f"M1 attempt {_attempt} exc: {type(_e1).__name__}: {str(_e1)[:150]}")
                 if "RateLimit" in type(_e1).__name__ and _attempt < 2:
-                    _time.sleep(2 ** _attempt + 2)  # 3s, 5s
+                    _time.sleep(2 ** _attempt + 2)
                 else:
                     break
 
         # Method 2 — crumb via fc.yahoo.com (works on Streamlit Cloud)
         try:
             crumb = get_yf_crumb()
-            _fetch_errors.append(f"M2 crumb={repr(crumb[:20]) if crumb else 'EMPTY'}")
             crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
             for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
                 for _attempt2 in range(2):
@@ -322,7 +316,6 @@ def fetch_company_info(ticker: str) -> dict:
                     )
                     try:
                         resp = session.get(url, timeout=15)
-                        _fetch_errors.append(f"M2 {host} att{_attempt2}: HTTP {resp.status_code}, body={resp.text[:120]}")
                         if resp.status_code == 429 and _attempt2 == 0:
                             _time.sleep(3)
                             continue
@@ -333,11 +326,10 @@ def fetch_company_info(ticker: str) -> dict:
                         if result:
                             return result[0]
                         break
-                    except Exception as _e2h:
-                        _fetch_errors.append(f"M2 {host} att{_attempt2} exc: {str(_e2h)[:120]}")
+                    except Exception:
                         break
-        except Exception as _e2:
-            _fetch_errors.append(f"M2 exc: {type(_e2).__name__}: {str(_e2)[:200]}")
+        except Exception:
+            pass
 
         return {}
 
@@ -495,16 +487,6 @@ def fetch_company_info(ticker: str) -> dict:
         "earnings_estimate":     earnings_estimate,
         "revenue_estimate":      revenue_estimate,
         "earnings_history":      earnings_history,
-        "_debug": {
-            "qs_modules":      list(qs.keys()),
-            "ap_sector":       ap.get("sector"),
-            "ap_longName":     ap.get("longName") or qt.get("longName"),
-            "fd_targetMean":   (fd.get("targetMeanPrice") or {}).get("raw") if isinstance(fd.get("targetMeanPrice"), dict) else fd.get("targetMeanPrice"),
-            "info_keys":       len(info),
-            "info_longName":   info.get("longName"),
-            "info_sector":     info.get("sector"),
-            "fetch_errors":    _fetch_errors,
-        },
     }
 
 
@@ -2939,11 +2921,6 @@ else:
         with st.spinner("Načítám informace o firmě…"):
             _ci = fetch_company_info(_ci_ticker)
         _info = _ci["info"]
-
-        # ── Temporary debug (remove after cloud issue is resolved) ────────
-        with st.expander("🔧 Debug: quoteSummary status", expanded=True):
-            st.json(_ci.get("_debug", {}))
-        # ─────────────────────────────────────────────────────────────────
 
         _ci_tabs = st.tabs([
             "📋 O firmě",
