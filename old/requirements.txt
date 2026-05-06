@@ -6,4 +6,3 @@ altair
 curl-cffi
 openpyxl
 xlsxwriter
-plotly
