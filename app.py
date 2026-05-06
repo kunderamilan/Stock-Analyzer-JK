@@ -163,14 +163,11 @@ def fetch_quick_metrics(ticker: str) -> dict:
         Returns a dict with raw float values, or empty dict on failure.
         """
         try:
-            import urllib.parse as _urlparse
             session = get_yf_session()
-            crumb = get_yf_crumb()
-            crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
             for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
                 url = (
                     f"https://{host}/v10/finance/quoteSummary/{tkr}"
-                    f"?modules=defaultKeyStatistics%2CsummaryDetail{crumb_param}"
+                    f"?modules=defaultKeyStatistics%2CsummaryDetail"
                 )
                 resp = session.get(url, timeout=10)
                 data = resp.json()
@@ -239,9 +236,9 @@ def fetch_quick_metrics(ticker: str) -> dict:
 def fetch_company_info(ticker: str) -> dict:
     """
     Fetch all company-info data.
-    Earnings/calendar/estimates are fetched via direct quoteSummary API calls
-    (same approach as the valuation table) so they work on Streamlit Cloud where
-    certain yfinance property endpoints get blocked. yfinance is used as fallback.
+    Earnings/calendar/estimates are fetched via t._data.get_raw_json() which
+    uses yfinance's own authenticated session (handles cookies/crumb internally),
+    so it works on both corporate networks and Streamlit Cloud.
     Returns a dict with keys: info, income_stmt, major_holders,
     institutional_holders, calendar, news, earnings_estimate,
     revenue_estimate, earnings_history.
@@ -263,25 +260,27 @@ def fetch_company_info(ticker: str) -> dict:
         except Exception:
             return default
 
-    # ── Direct quoteSummary API (works on Streamlit Cloud) ────────────────
+    # ── Trigger yfinance auth setup ────────────────────────────────────────
+    # fast_info initialises cookies/crumb inside t._data so that
+    # t._data.get_raw_json() calls below are properly authenticated.
+    _safe(lambda: t.fast_info)
+
+    # ── Direct quoteSummary via yfinance's own authenticated request ───────
+    # t._data.get_raw_json() handles crumb/cookie internally and works on
+    # both corporate networks (CSRF cookie) and Streamlit Cloud (fc.yahoo.com).
     def _fetch_quote_summary(modules: list) -> dict:
-        import urllib.parse as _urlparse
         modules_str = "%2C".join(modules)
-        crumb = get_yf_crumb()
-        crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
-        for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
-            try:
-                url = (
-                    f"https://{host}/v10/finance/quoteSummary/{ticker}"
-                    f"?modules={modules_str}{crumb_param}"
-                )
-                resp = session.get(url, timeout=15)
-                data = resp.json()
-                result = data.get("quoteSummary", {}).get("result")
-                if result:
-                    return result[0]
-            except Exception:
-                continue
+        url = (
+            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+            f"?modules={modules_str}"
+        )
+        try:
+            data = t._data.get_raw_json(url)
+            result = data.get("quoteSummary", {}).get("result")
+            if result:
+                return result[0]
+        except Exception:
+            pass
         return {}
 
     qs = _fetch_quote_summary([
