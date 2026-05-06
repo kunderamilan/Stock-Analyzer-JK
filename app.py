@@ -265,22 +265,45 @@ def fetch_company_info(ticker: str) -> dict:
     # t._data.get_raw_json() calls below are properly authenticated.
     _safe(lambda: t.fast_info)
 
-    # ── Direct quoteSummary via yfinance's own authenticated request ───────
-    # t._data.get_raw_json() handles crumb/cookie internally and works on
-    # both corporate networks (CSRF cookie) and Streamlit Cloud (fc.yahoo.com).
+    # ── Direct quoteSummary — dual-method for max compatibility ───────────
+    # Method 1: t._data.get_raw_json()  → works on corporate networks (CSRF cookie)
+    # Method 2: crumb via fc.yahoo.com  → works on Streamlit Cloud (no SSL proxy)
     def _fetch_quote_summary(modules: list) -> dict:
+        import urllib.parse as _urlparse
         modules_str = "%2C".join(modules)
-        url = (
+        base_url = (
             f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
             f"?modules={modules_str}"
         )
+
+        # Method 1 — yfinance internal auth (handles CSRF/crumb internally)
         try:
-            data = t._data.get_raw_json(url)
+            data = t._data.get_raw_json(base_url)
             result = data.get("quoteSummary", {}).get("result")
             if result:
                 return result[0]
         except Exception:
             pass
+
+        # Method 2 — crumb via fc.yahoo.com (works on Streamlit Cloud)
+        try:
+            crumb = get_yf_crumb()
+            crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
+            for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+                url = (
+                    f"https://{host}/v10/finance/quoteSummary/{ticker}"
+                    f"?modules={modules_str}{crumb_param}"
+                )
+                resp = session.get(url, timeout=15)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                result = data.get("quoteSummary", {}).get("result")
+                if result:
+                    return result[0]
+        except Exception:
+            pass
+
         return {}
 
     qs = _fetch_quote_summary([
@@ -297,6 +320,15 @@ def fetch_company_info(ticker: str) -> dict:
     ap = qs.get("assetProfile", {})
     sd = qs.get("summaryDetail", {})
     qt = qs.get("quoteType", {})
+
+    # ── Debug: expose quoteSummary status via session_state (readable in UI) ──
+    import streamlit as _st
+    _st.session_state["_qs_debug"] = {
+        "qs_modules": list(qs.keys()),
+        "fd_keys_sample": list(fd.keys())[:5] if fd else [],
+        "ap_sector": ap.get("sector"),
+        "info_keys": len(info),
+    }
 
     # Fields sourced from assetProfile / quoteType
     _ap_fallback = {
@@ -2871,6 +2903,13 @@ else:
         with st.spinner("Načítám informace o firmě…"):
             _ci = fetch_company_info(_ci_ticker)
         _info = _ci["info"]
+
+        # ── Temporary debug (remove after cloud issue is resolved) ────────
+        _qs_dbg = st.session_state.get("_qs_debug", {})
+        if _qs_dbg:
+            with st.expander("🔧 Debug: quoteSummary status", expanded=False):
+                st.json(_qs_dbg)
+        # ─────────────────────────────────────────────────────────────────
 
         _ci_tabs = st.tabs([
             "📋 O firmě",
