@@ -64,21 +64,34 @@ def get_yf_session():
     s.verify = _verify_ssl
     return s
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_yf_crumb() -> str:
     """
     Obtain a Yahoo Finance crumb token required for v10 quoteSummary API calls.
     Flow: GET fc.yahoo.com (sets cookie) → GET /v1/test/getcrumb (returns crumb).
     Returns empty string on failure (callers should handle gracefully).
     """
-    try:
-        s = get_yf_session()
-        s.get("https://fc.yahoo.com", timeout=10)
-        resp = s.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=10)
-        crumb = resp.text.strip()
-        return crumb if crumb else ""
-    except Exception:
-        return ""
+    import time as _t
+    s = get_yf_session()
+    for _attempt in range(3):
+        try:
+            s.get("https://fc.yahoo.com", timeout=10)
+            resp = s.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+            crumb = resp.text.strip()
+            # A valid crumb is a short token — reject rate-limit / error responses
+            if (crumb
+                    and len(crumb) < 50
+                    and "Too Many" not in crumb
+                    and "Unauthorized" not in crumb
+                    and "\n" not in crumb):
+                return crumb
+            # Rate-limited — wait and retry
+            if _attempt < 2:
+                _t.sleep(2 ** _attempt + 1)  # 2s, 3s
+        except Exception:
+            if _attempt < 2:
+                _t.sleep(2 ** _attempt + 1)
+    return ""
 
 def fetch_close_series(ticker: str, period_key: str, start=None, end=None) -> pd.Series:
     session = get_yf_session()
@@ -272,22 +285,29 @@ def fetch_company_info(ticker: str) -> dict:
 
     def _fetch_quote_summary(modules: list) -> dict:
         import urllib.parse as _urlparse
+        import time as _time
         modules_str = "%2C".join(modules)
         base_url = (
             f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
             f"?modules={modules_str}"
         )
 
-        # Method 1 — yfinance internal auth (handles CSRF/crumb internally)
-        try:
-            data = t._data.get_raw_json(base_url)
-            result = data.get("quoteSummary", {}).get("result")
-            if result:
-                return result[0]
-            else:
-                _fetch_errors.append(f"M1: no result, raw={str(data)[:200]}")
-        except Exception as _e1:
-            _fetch_errors.append(f"M1 exc: {type(_e1).__name__}: {str(_e1)[:200]}")
+        # Method 1 — yfinance internal auth (handles CSRF/crumb internally), with retry
+        for _attempt in range(3):
+            try:
+                data = t._data.get_raw_json(base_url)
+                result = data.get("quoteSummary", {}).get("result")
+                if result:
+                    return result[0]
+                else:
+                    _fetch_errors.append(f"M1 attempt {_attempt}: no result, raw={str(data)[:200]}")
+                    break
+            except Exception as _e1:
+                _fetch_errors.append(f"M1 attempt {_attempt} exc: {type(_e1).__name__}: {str(_e1)[:150]}")
+                if "RateLimit" in type(_e1).__name__ and _attempt < 2:
+                    _time.sleep(2 ** _attempt + 2)  # 3s, 5s
+                else:
+                    break
 
         # Method 2 — crumb via fc.yahoo.com (works on Streamlit Cloud)
         try:
@@ -295,21 +315,27 @@ def fetch_company_info(ticker: str) -> dict:
             _fetch_errors.append(f"M2 crumb={repr(crumb[:20]) if crumb else 'EMPTY'}")
             crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
             for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
-                url = (
-                    f"https://{host}/v10/finance/quoteSummary/{ticker}"
-                    f"?modules={modules_str}{crumb_param}"
-                )
-                try:
-                    resp = session.get(url, timeout=15)
-                    _fetch_errors.append(f"M2 {host}: HTTP {resp.status_code}, body={resp.text[:120]}")
-                    if resp.status_code != 200:
-                        continue
-                    data = resp.json()
-                    result = data.get("quoteSummary", {}).get("result")
-                    if result:
-                        return result[0]
-                except Exception as _e2h:
-                    _fetch_errors.append(f"M2 {host} exc: {str(_e2h)[:120]}")
+                for _attempt2 in range(2):
+                    url = (
+                        f"https://{host}/v10/finance/quoteSummary/{ticker}"
+                        f"?modules={modules_str}{crumb_param}"
+                    )
+                    try:
+                        resp = session.get(url, timeout=15)
+                        _fetch_errors.append(f"M2 {host} att{_attempt2}: HTTP {resp.status_code}, body={resp.text[:120]}")
+                        if resp.status_code == 429 and _attempt2 == 0:
+                            _time.sleep(3)
+                            continue
+                        if resp.status_code != 200:
+                            break
+                        data = resp.json()
+                        result = data.get("quoteSummary", {}).get("result")
+                        if result:
+                            return result[0]
+                        break
+                    except Exception as _e2h:
+                        _fetch_errors.append(f"M2 {host} att{_attempt2} exc: {str(_e2h)[:120]}")
+                        break
         except Exception as _e2:
             _fetch_errors.append(f"M2 exc: {type(_e2).__name__}: {str(_e2)[:200]}")
 
