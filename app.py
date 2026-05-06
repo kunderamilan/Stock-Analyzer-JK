@@ -63,6 +63,23 @@ def get_yf_session():
     _verify_ssl = os.getenv("YF_VERIFY_SSL", "1").strip().lower() not in {"0", "false", "no"}
     s.verify = _verify_ssl
     return s
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_yf_crumb() -> str:
+    """
+    Obtain a Yahoo Finance crumb token required for v10 quoteSummary API calls.
+    Flow: GET fc.yahoo.com (sets cookie) → GET /v1/test/getcrumb (returns crumb).
+    Returns empty string on failure (callers should handle gracefully).
+    """
+    try:
+        s = get_yf_session()
+        s.get("https://fc.yahoo.com", timeout=10)
+        resp = s.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+        crumb = resp.text.strip()
+        return crumb if crumb else ""
+    except Exception:
+        return ""
+
 def fetch_close_series(ticker: str, period_key: str, start=None, end=None) -> pd.Series:
     session = get_yf_session()
     t = yf.Ticker(ticker=ticker, session=session)
@@ -146,11 +163,14 @@ def fetch_quick_metrics(ticker: str) -> dict:
         Returns a dict with raw float values, or empty dict on failure.
         """
         try:
+            import urllib.parse as _urlparse
             session = get_yf_session()
+            crumb = get_yf_crumb()
+            crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
             for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
                 url = (
                     f"https://{host}/v10/finance/quoteSummary/{tkr}"
-                    f"?modules=defaultKeyStatistics%2CsummaryDetail"
+                    f"?modules=defaultKeyStatistics%2CsummaryDetail{crumb_param}"
                 )
                 resp = session.get(url, timeout=10)
                 data = resp.json()
@@ -245,12 +265,15 @@ def fetch_company_info(ticker: str) -> dict:
 
     # ── Direct quoteSummary API (works on Streamlit Cloud) ────────────────
     def _fetch_quote_summary(modules: list) -> dict:
+        import urllib.parse as _urlparse
         modules_str = "%2C".join(modules)
+        crumb = get_yf_crumb()
+        crumb_param = f"&crumb={_urlparse.quote(crumb)}" if crumb else ""
         for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
             try:
                 url = (
                     f"https://{host}/v10/finance/quoteSummary/{ticker}"
-                    f"?modules={modules_str}"
+                    f"?modules={modules_str}{crumb_param}"
                 )
                 resp = session.get(url, timeout=15)
                 data = resp.json()
